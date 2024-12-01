@@ -1,6 +1,6 @@
 # Real-time Depth Estimation GUI
 
-A PyQt6-based application for real-time depth estimation using your webcam. Built with PyTorch and optimized for Apple Silicon (M1/M2) GPUs.
+A PyQt6-based application for real-time depth estimation using your webcam. Built with PyTorch and optimized for Apple Silicon (M1/M2/M3) GPUs.
 
 ## Features
 
