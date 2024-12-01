@@ -11,8 +11,12 @@ A PyQt6-based application for real-time depth estimation using your webcam. Buil
 - Video recording capability
 - FPS monitoring
 
-## Installation
+  
+### Useage
 
+python depth_estimation.py
+
+## Installation
 ```bash
 # Create and activate virtual environment
 python -m venv .venv
@@ -22,5 +26,4 @@ source .venv/bin/activate  # Unix/macOS
 
 # Install dependencies
 pip install torch torchvision transformers opencv-python pillow PyQt6
-
 
