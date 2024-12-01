@@ -24,35 +24,3 @@ source .venv/bin/activate  # Unix/macOS
 pip install torch torchvision transformers opencv-python pillow PyQt6
 
 
-
-
-
-Usage
-bashCopypython depth_estimation.py
-Requirements
-
-Python 3.9+
-PyTorch 2.0+
-Apple Silicon Mac (for GPU support) or any computer with a webcam
-Required Python packages:
-
-PyQt6
-torch
-torchvision
-transformers
-opencv-python
-pillow
-
-
-
-Controls
-
-Start/Stop: Begin/end depth estimation
-Record: Save video output
-Depth Threshold: Adjust depth sensitivity
-Colormap: Change visualization style
-
-License
-MIT License
-Acknowledgments
-Uses the Depth-Anything model for depth estimation.
