@@ -43,6 +43,12 @@ import os
 # Set the environment variable to enable CPU fallback for unsupported MPS operations
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 
+import torch
+import os
+
+# Enable GPU acceleration with Metal Performance Shaders (MPS)
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+
 class DepthEstimationThread(QThread):
     frame_ready = pyqtSignal(np.ndarray, np.ndarray, float)
     error_occurred = pyqtSignal(str)
@@ -52,9 +58,13 @@ class DepthEstimationThread(QThread):
         self.is_running = False
         self.frame_queue = Queue(maxsize=2)
         
-        # Force CPU usage to avoid MPS issues
-        self.device = 'cpu'  # Changed from MPS to CPU
-        logger.info("Using CPU device for better compatibility")
+        # Check and set up GPU device
+        if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+            self.device = torch.device("mps")
+            logger.info("Using Apple Metal GPU (MPS)")
+        else:
+            self.device = torch.device("cpu")
+            logger.info("GPU not available, falling back to CPU")
             
         self.recording = False
         self.video_writer = None
@@ -66,61 +76,93 @@ class DepthEstimationThread(QThread):
         
         # Initialize the model
         self.load_model()
-
+    def setup_camera(self):
+            """Initialize and configure the camera"""
+            try:
+                logger.info("Setting up camera...")
+                if self.cap is not None and self.cap.isOpened():
+                    self.cap.release()
+                
+                self.cap = cv2.VideoCapture(0)
+                
+                # Check if camera opened successfully
+                if not self.cap.isOpened():
+                    raise Exception("Could not open camera")
+                    
+                # Configure camera settings for optimal performance
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+                self.cap.set(cv2.CAP_PROP_FPS, 30)
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                
+                # Verify camera settings
+                actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+                actual_width = self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                actual_height = self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                
+                logger.info(f"Camera initialized - FPS: {actual_fps}, Resolution: {actual_width}x{actual_height}")
+                
+                # Test camera by reading one frame
+                ret, test_frame = self.cap.read()
+                if not ret or test_frame is None:
+                    raise Exception("Could not read frame from camera")
+                    
+                return True
+                
+            except Exception as e:
+                error_msg = f"Camera setup failed: {str(e)}"
+                logger.error(error_msg)
+                self.error_occurred.emit(error_msg)
+                return False
     def load_model(self):
         try:
-            logger.info("Loading depth estimation model...")
+            logger.info(f"Loading depth estimation model on {self.device}...")
+            
+            # Initialize model with GPU support
             self.pipe = pipeline(
                 task="depth-estimation",
                 model="depth-anything/Depth-Anything-V2-Small-hf",
-                device=self.device  # This will now use CPU
+                device=self.device
             )
+            
             self.model_loaded = True
-            logger.info(f"Depth estimation pipeline initialized on device: {self.device}")
+            logger.info(f"Model loaded successfully on {self.device}")
+            
         except Exception as e:
             self.model_loaded = False
-            error_msg = f"Failed to initialize depth pipeline: {str(e)}"
+            error_msg = f"Failed to initialize model: {str(e)}"
             logger.error(error_msg)
             self.error_occurred.emit(error_msg)
 
-
-    def setup_camera(self):
+    def process_frame(self, frame):
+        """Process a single frame with GPU acceleration"""
         try:
-            logger.info("Setting up camera...")
-            if self.cap is not None and self.cap.isOpened():
-                self.cap.release()
-            
-            self.cap = cv2.VideoCapture(0)
-            
-            # Check if camera opened successfully
-            if not self.cap.isOpened():
-                raise Exception("Could not open camera")
+            frame_resized = cv2.resize(frame, (320, 240))
+            rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(rgb_frame)
+
+            # Run inference on GPU
+            with torch.inference_mode():
+                depth_map = self.pipe(pil_img)["depth"]
                 
-            # Configure camera settings
-            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
-            self.cap.set(cv2.CAP_PROP_FPS, 30)
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            # Move depth map to CPU for OpenCV processing
+            depth_map = depth_map.cpu().numpy() if hasattr(depth_map, 'cpu') else depth_map
             
-            # Verify camera settings
-            actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
-            actual_width = self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-            actual_height = self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            depth_normalized = cv2.normalize(
+                np.array(depth_map), 
+                None, 
+                0, 
+                255, 
+                cv2.NORM_MINMAX
+            ).astype(np.uint8)
             
-            logger.info(f"Camera initialized with FPS: {actual_fps}, Resolution: {actual_width}x{actual_height}")
+            depth_normalized[depth_normalized < self.depth_threshold] = 0
+            depth_colored = cv2.applyColorMap(depth_normalized, self.selected_colormap)
             
-            # Test camera by reading one frame
-            ret, test_frame = self.cap.read()
-            if not ret or test_frame is None:
-                raise Exception("Could not read frame from camera")
-                
-            return True
+            return frame_resized, depth_colored
             
         except Exception as e:
-            error_msg = f"Camera setup failed: {str(e)}"
-            logger.error(error_msg)
-            self.error_occurred.emit(error_msg)
-            return False
+            raise Exception(f"Frame processing error: {str(e)}")
 
     def run(self):
         if not self.model_loaded:
@@ -133,38 +175,21 @@ class DepthEstimationThread(QThread):
 
         self.is_running = True
         frame_count = 0
-        error_count = 0
         
         try:
             while self.is_running:
                 try:
-                    if not self.cap.isOpened():
-                        raise Exception("Camera disconnected")
-                        
                     current_time = time.time()
-                    fps = 1.0 / (current_time - self.last_frame_time)
-                    self.last_frame_time = current_time
-
                     ret, frame = self.cap.read()
-                    if not ret or frame is None:
-                        raise Exception("Failed to capture frame")
-
-                    frame_resized = cv2.resize(frame, (320, 240))
-                    rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-                    pil_img = Image.fromarray(rgb_frame)
-
-                    # Process depth estimation
-                    depth_map = self.pipe(pil_img)["depth"]
-                    depth_normalized = cv2.normalize(
-                        np.array(depth_map), 
-                        None, 
-                        0, 
-                        255, 
-                        cv2.NORM_MINMAX
-                    ).astype(np.uint8)
                     
-                    depth_normalized[depth_normalized < self.depth_threshold] = 0
-                    depth_colored = cv2.applyColorMap(depth_normalized, self.selected_colormap)
+                    if not ret:
+                        continue
+
+                    # Process frame with GPU acceleration
+                    frame_resized, depth_colored = self.process_frame(frame)
+                    
+                    # Calculate FPS
+                    fps = 1.0 / (time.time() - current_time)
                     
                     if self.recording and self.video_writer:
                         combined_frame = np.hstack((frame_resized, depth_colored))
@@ -172,36 +197,28 @@ class DepthEstimationThread(QThread):
                     
                     self.frame_ready.emit(frame_resized, depth_colored, fps)
                     frame_count += 1
-                    error_count = 0  # Reset error count on successful frame
                     
-                    # Add small delay to prevent high CPU usage
-                    time.sleep(0.01)
-
+                except torch.cuda.OutOfMemoryError:
+                    logger.error("GPU out of memory, clearing cache...")
+                    torch.mps.empty_cache()
+                    continue
+                    
                 except Exception as e:
-                    error_count += 1
                     error_msg = f"Frame processing error: {str(e)}"
                     logger.error(error_msg)
-                    
-                    # Only emit error if it persists
-                    if error_count >= 5:
-                        self.error_occurred.emit(error_msg)
-                        break
-                    
-                    time.sleep(0.1)  # Wait before retrying
+                    self.error_occurred.emit(error_msg)
                     continue
 
-        except Exception as e:
-            error_msg = f"Stream error: {str(e)}"
-            logger.error(error_msg)
-            self.error_occurred.emit(error_msg)
-            
         finally:
             self.cleanup()
-            logger.info(f"Stream stopped. Processed {frame_count} frames.")
+            logger.info(f"Processed {frame_count} frames")
 
     def cleanup(self):
-        """Clean up resources"""
+        """Clean up GPU resources"""
         logger.info("Cleaning up resources...")
+        if hasattr(self, 'pipe'):
+            del self.pipe
+        torch.mps.empty_cache()
         if self.video_writer:
             self.video_writer.release()
         if self.cap:
